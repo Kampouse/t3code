@@ -1,15 +1,31 @@
-import { IronClawSettings, ProviderDriverKind, type ServerProvider } from "@t3tools/contracts";
+/**
+ * IronClawDriver — `ProviderDriver` for the IronClaw Web Gateway.
+ *
+ * Connects to a running IronClaw instance (local or hosted) via its
+ * HTTP Web Gateway API (default `http://127.0.0.1:3000`).
+ *
+ * No child process management — IronClaw always runs externally.
+ *
+ * @module provider/Drivers/IronClawDriver
+ */
+
+import {
+  IronClawSettings,
+  ProviderDriverKind,
+  type ServerProvider,
+} from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as HttpClient from "effect/HttpClient";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { HttpClient } from "effect/unstable/http";
 
-import { makeIronClawTextGeneration } from "../../textGeneration/IronClawTextGeneration.ts";
+import { ServerConfig } from "../../config.ts";
 import { ProviderDriverError } from "../Errors.ts";
-import { makeIronClawAdapter } from "../Layers/IronClawAdapter.ts";
+import { makeIronClawAdapterLive } from "../Layers/IronClawAdapter.ts";
 import {
-  checkIronClawProviderStatus,
+  checkIronClawHealth,
   makePendingIronClawProvider,
 } from "../Layers/IronClawProvider.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
@@ -18,15 +34,13 @@ import {
   type ProviderDriver,
   type ProviderInstance,
 } from "../ProviderDriver.ts";
-import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
+import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 
 const decodeIronClawSettings = Schema.decodeSync(IronClawSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("ironclaw");
 const SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
-
-export type IronClawDriverEnv = HttpClient.HttpClient;
 
 const withInstanceIdentity =
   (input: {
@@ -44,6 +58,10 @@ const withInstanceIdentity =
     continuation: { groupKey: input.continuationGroupKey },
   });
 
+export type IronClawDriverEnv =
+  | HttpClient.HttpClient
+  | ServerConfig;
+
 export const IronClawDriver: ProviderDriver<IronClawSettings, IronClawDriverEnv> = {
   driverKind: DRIVER_KIND,
   metadata: {
@@ -54,40 +72,48 @@ export const IronClawDriver: ProviderDriver<IronClawSettings, IronClawDriverEnv>
   defaultConfig: (): IronClawSettings => decodeIronClawSettings({}),
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
+      const serverConfig = yield* ServerConfig;
       const httpClient = yield* HttpClient.HttpClient;
       const processEnv = mergeProviderInstanceEnvironment(environment);
+
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
         instanceId,
       });
+
       const stampIdentity = withInstanceIdentity({
         instanceId,
         displayName,
         accentColor,
         continuationGroupKey: continuationIdentity.continuationKey,
       });
+
       const effectiveConfig = { ...config, enabled } satisfies IronClawSettings;
 
-      const adapter = yield* makeIronClawAdapter(effectiveConfig, instanceId);
-      const textGeneration = yield* makeIronClawTextGeneration(effectiveConfig);
-
-      const checkProvider = checkIronClawProviderStatus(effectiveConfig).pipe(
-        Effect.map(stampIdentity),
+      // Build adapter
+      const adapter = yield* makeIronClawAdapterLive(effectiveConfig).pipe(
+        Effect.provideService(HttpClient.HttpClient, httpClient),
+        Effect.provideService(ServerConfig, serverConfig),
       );
 
+      // Build snapshot with health check
       const snapshot = yield* makeManagedServerProvider<IronClawSettings>({
         maintenanceCapabilities: {
-          provider: DRIVER_KIND,
-          packageName: null,
-          update: null,
+          canUpdate: false,
+          canConfigure: true,
         },
         getSettings: Effect.succeed(effectiveConfig),
         streamSettings: Stream.never,
         haveSettingsChanged: () => false,
-        initialSnapshot: (settings) =>
-          makePendingIronClawProvider(settings).pipe(Effect.map(stampIdentity)),
-        checkProvider,
-        enrichSnapshot: undefined,
+        initialSnapshot: () =>
+          makePendingIronClawProvider(effectiveConfig).pipe(
+            Effect.map(stampIdentity),
+          ),
+        checkProvider: checkIronClawHealth(effectiveConfig).pipe(
+          Effect.map(stampIdentity),
+          Effect.provideService(HttpClient.HttpClient, httpClient),
+        ),
+        enrichSnapshot: ({ snapshot }) => Effect.succeed(snapshot),
         refreshInterval: SNAPSHOT_REFRESH_INTERVAL,
       }).pipe(
         Effect.mapError(
@@ -110,7 +136,10 @@ export const IronClawDriver: ProviderDriver<IronClawSettings, IronClawDriverEnv>
         enabled,
         snapshot,
         adapter,
-        textGeneration,
+        textGeneration: {
+          generate: () => Effect.die("not implemented — use adapter events"),
+          generateStream: () => Stream.die("not implemented — use adapter events"),
+        },
       } satisfies ProviderInstance;
     }),
 };
