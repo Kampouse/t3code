@@ -4,123 +4,97 @@
  * @module provider/Layers/IronClawProvider
  */
 
-import {
-  type IronClawSettings,
-  ProviderDriverKind,
-  type ServerProvider,
-} from "@t3tools/contracts";
+import type { IronClawSettings } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
-import * as Schema from "effect/Schema";
-import * as Stream from "effect/Stream";
-import { HttpClient } from "effect/unstable/http";
 
-import { ServerConfig } from "../../config.ts";
 import { ProviderDriverError } from "../Errors.ts";
-import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
-import type { ServerProviderDraft } from "../providerSnapshot.ts";
-
-const DRIVER = ProviderDriverKind.make("ironclaw");
+import { buildServerProvider, type ServerProviderDraft } from "../providerSnapshot.ts";
 
 function checkIronClawHealth(
   settings: IronClawSettings,
-): Effect.Effect<ServerProviderDraft, Error, HttpClient.HttpClient> {
+): Effect.Effect<ServerProviderDraft, never, never> {
   const serverUrl =
     settings.serverUrl?.replace(/\/+$/, "") || "http://127.0.0.1:3000";
   const apiToken = settings.apiToken || "";
 
-  return Effect.gen(function* () {
-    const client = yield* HttpClient.HttpClient;
+  return Effect.tryPromise({
+    try: async () => {
+      const headers: Record<string, string> = {
+        Accept: "application/json",
+      };
+      if (apiToken) {
+        headers["Authorization"] = `Bearer ${apiToken}`;
+      }
 
-    const headers: Record<string, string> = {
-      Accept: "application/json",
-    };
-    if (apiToken) {
-      headers["Authorization"] = `Bearer ${apiToken}`;
-    }
+      const response = await fetch(`${serverUrl}/api/health`, {
+        headers,
+        signal: AbortSignal.timeout(4000),
+      });
 
-    const response = yield* client
-      .execute(
-        client.request.get(`${serverUrl}/api/health`).pipe(
-          HttpClient.setHeaders(headers),
-        ),
-      )
-      .pipe(
-        Effect.tap((resp) =>
-          Effect.logDebug(
-            `[IronClaw] Health check: ${resp.status} from ${serverUrl}/api/health`,
-          ),
-        ),
-        Effect.mapError(
-          (e) =>
-            new Error(`IronClaw health check failed (${serverUrl}): ${String(e)}`),
-        ),
-      );
+      if (!response.ok) {
+        return buildServerProvider({
+          presentation: { displayName: "IronClaw" },
+          enabled: settings.enabled ?? true,
+          checkedAt: new Date().toISOString(),
+          models: [],
+          probe: {
+            installed: false,
+            version: null,
+            status: "error",
+            auth: { authenticated: false },
+            message: `Health check returned HTTP ${response.status}`,
+          },
+        });
+      }
 
-    if (response.status >= 400) {
-      yield* Effect.logWarning(
-        `[IronClaw] Health check returned ${response.status}`,
-      );
-      return {
-        state: "error" as const,
-        error: Option.some(
-          new ProviderDriverError({
-            driver: DRIVER,
-            instanceId: "ironclaw" as any,
-            detail: `Health check returned HTTP ${response.status}`,
-          }),
-        ),
-      } satisfies ServerProviderDraft;
-    }
-
-    const body = yield* Effect.tryPromise(() =>
-      response.json as Promise<{
-        status?: string;
-        channel?: string;
-      }>,
-    ).pipe(
-      Effect.mapError(
-        (e) => new Error(`Failed to parse health response: ${String(e)}`),
-      ),
-    );
-
-    yield* Effect.logDebug(
-      `[IronClaw] Health OK: status=${body.status}, channel=${body.channel}`,
-    );
-
-    return {
-      state: "ready" as const,
-      capabilities: {
-        streaming: true,
-        tools: true,
-        threads: true,
-        memory: true,
-        jobs: true,
-      },
-    } satisfies ServerProviderDraft;
-  }).pipe(
-    Effect.catchAll((e) =>
-      Effect.succeed({
-        state: "unavailable" as const,
-        error: Option.some(
-          new ProviderDriverError({
-            driver: DRIVER,
-            instanceId: "ironclaw" as any,
-            detail: `IronClaw unavailable: ${e instanceof Error ? e.message : String(e)}`,
-            cause: e,
-          }),
-        ),
-      } satisfies ServerProviderDraft),
-    ),
-  );
+      return buildServerProvider({
+        presentation: { displayName: "IronClaw" },
+        enabled: settings.enabled ?? true,
+        checkedAt: new Date().toISOString(),
+        models: [],
+        probe: {
+          installed: true,
+          version: null,
+          status: "ready",
+          auth: { authenticated: true },
+        },
+      });
+    },
+    catch: (e) =>
+      buildServerProvider({
+        presentation: { displayName: "IronClaw" },
+        enabled: settings.enabled ?? true,
+        checkedAt: new Date().toISOString(),
+        models: [],
+        probe: {
+          installed: false,
+          version: null,
+          status: "unavailable",
+          auth: { authenticated: false },
+          message: `IronClaw unavailable: ${e instanceof Error ? e.message : String(e)}`,
+        },
+      }),
+  });
 }
 
 function makePendingIronClawProvider(
   _settings: IronClawSettings,
 ): Effect.Effect<ServerProviderDraft, never, never> {
-  return Effect.succeed({
-    state: "pending",
-  } satisfies ServerProviderDraft);
+  return Effect.succeed(
+    buildServerProvider({
+      presentation: { displayName: "IronClaw" },
+      enabled: true,
+      checkedAt: new Date().toISOString(),
+      models: [],
+      probe: {
+        installed: false,
+        version: null,
+        status: "pending",
+        auth: { authenticated: false },
+      },
+    }),
+  );
 }
 
 export { checkIronClawHealth, makePendingIronClawProvider };

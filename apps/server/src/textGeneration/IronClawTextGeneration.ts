@@ -22,12 +22,12 @@ export interface IronClawTextGeneration {
   readonly generate: (
     content: string,
     threadId?: string,
-  ) => Effect.Effect<IronClawTextGenerationResult, Error, HttpClient.HttpClient>;
+  ) => Effect.Effect<IronClawTextGenerationResult, Error, HttpClient>;
 
   readonly generateStream: (
     content: string,
     threadId?: string,
-  ) => Stream.Stream<string, Error, HttpClient.HttpClient>;
+  ) => Stream.Stream<string, Error, HttpClient>;
 }
 
 function makeIronClawTextGeneration(
@@ -50,7 +50,7 @@ function makeIronClawTextGeneration(
   return Effect.succeed({
     generate(content: string, threadId?: string) {
       return Effect.gen(function* () {
-        const client = yield* HttpClient.HttpClient;
+        const client = yield* HttpClient;
 
         const body: Record<string, unknown> = {
           content,
@@ -131,7 +131,7 @@ function makeIronClawTextGeneration(
       // Stream via SSE — connect to /api/chat/events and send the message
       return Stream.fromEffect(
         Effect.gen(function* () {
-          const client = yield* HttpClient.HttpClient;
+          const client = yield* HttpClient;
 
           // Send the message
           yield* client
